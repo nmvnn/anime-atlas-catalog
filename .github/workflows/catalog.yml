@@ -1,0 +1,70 @@
+name: Build and publish catalogue
+
+# Runs weekly and on demand. Builds the Anime Atlas search catalogue from the open
+# anime-offline-database (ODbL-1.0) plus Wikidata labels (CC0), tests it, and publishes
+# search.json + about.json through GitHub Pages. No server is needed.
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: catalogue
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Self-test the builder
+        run: python scripts/test-catalog-build.py
+
+      - name: Download sources
+        run: |
+          mkdir -p src
+          curl -fsSL --retry 3 -o src/manami.json \
+            https://github.com/manami-project/anime-offline-database/releases/latest/download/anime-offline-database-minified.json
+          # Wikidata labels (CC0) are optional: if the query fails the catalogue is built without them.
+          python scripts/fetch-wikidata.py src/wikidata.json || echo "::warning::Wikidata unavailable; building without extra labels"
+
+      - name: Build catalogue
+        run: python scripts/build-catalog.py src site
+
+      - name: Sanity checks
+        run: |
+          python - <<'PY'
+          import json, hashlib
+          about = json.load(open('site/about.json', encoding='utf-8'))
+          data = open('site/search.json', 'rb').read()
+          assert about['entries'] > 30000, about['entries']
+          assert hashlib.sha256(data).hexdigest() == about['sha256']
+          assert about['originalTitles'] > 5000, about
+          print('ok', about['entries'], 'entries, version', about['version'], 'english', about['englishTitles'])
+          PY
+
+      - name: Add legal pages
+        run: cp -r pages/. site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
